@@ -1,0 +1,11 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/HEAD/configuration-schema.json
+package: api
+output: api.gen.go
+generate:
+  chi-server: true
+  strict-server: true
+  models: true
+  embedded-spec: true
+compatibility:
+  # Avoid bare package-level enum constants like `Ok`; generate `HealthStatusOk`.
+  always-prefix-enum-values: true

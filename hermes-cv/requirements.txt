@@ -1,0 +1,5 @@
+# Also requires the tesseract binary on PATH (e.g. `pacman -S tesseract tesseract-data-eng`)
+opencv-python
+numpy
+pandas
+pytesseract

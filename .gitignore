@@ -1,0 +1,42 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Claude Code per-user settings
+.claude/settings.local.json
+
+# Editors / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sw?
+.DS_Store
+
+# --- hermes-web (Go) ---
+# Build output (go build -o bin/, air tmp dir)
+hermes-web/bin/
+hermes-web/tmp/
+*.test
+*.out
+coverage.*
+# Note: internal/api/api.gen.go is generated but intentionally committed.
+
+# --- hermes-cv (Python) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+# Pipeline intermediates written to the working directory
+hermes-cv/norm.png
+hermes-cv/words.csv
+hermes-cv/rows.json
+# Input scans (financial documents) — keep out of git
+hermes-cv/scans/
+hermes-cv/*.png
+hermes-cv/*.jpg
+hermes-cv/*.jpeg
+hermes-cv/*.tif
+hermes-cv/*.tiff
+hermes-cv/*.pdf
