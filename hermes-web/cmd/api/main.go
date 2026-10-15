@@ -10,7 +10,10 @@ import (
 	"syscall"
 
 	"github.com/acgtubio/hermes/internal/database"
+	"github.com/acgtubio/hermes/internal/pipeline"
 	"github.com/acgtubio/hermes/internal/server"
+	"github.com/acgtubio/hermes/internal/storage"
+	"github.com/acgtubio/hermes/internal/worker"
 )
 
 func main() {
@@ -36,8 +39,28 @@ func run() error {
 		return err
 	}
 	defer pool.Close()
+	if err := database.Migrate(ctx, pool); err != nil {
+		return err
+	}
+	objects, err := storage.New(ctx, cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
+	if err != nil {
+		return err
+	}
+	docs := database.NewDocuments(pool)
 
-	router, err := server.NewRouter(server.New(pool, log))
+	if n, err := docs.RequeueStale(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		log.Info("requeued documents left processing by the last run", "count", n)
+	}
+	w := worker.New(docs, pipeline.New(cfg.PipelineURL, cfg.PipelineTimeout), objects, log)
+	workerDone := make(chan struct{})
+	go func() { w.Run(ctx); close(workerDone) }()
+	defer func() { stop(); <-workerDone }() // let the worker finish its DB calls before the pool closes
+
+	router, err := server.NewRouter(server.New(server.Deps{
+		DB: pool, Docs: docs, Objects: objects, Wake: w.Wake, MaxUpload: cfg.MaxUploadMB << 20, Log: log,
+	}))
 	if err != nil {
 		return err
 	}

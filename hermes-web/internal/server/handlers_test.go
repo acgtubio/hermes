@@ -2,57 +2,107 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/acgtubio/hermes/internal/api"
+	"github.com/google/uuid"
+
+	"github.com/acgtubio/hermes/internal/database"
 )
+
+// Shared test helpers and fakes. Each handler's tests live next to it, in <operation>_test.go.
 
 type fakePinger struct{ err error }
 
 func (f fakePinger) Ping(context.Context) error { return f.err }
 
+type fakeDocs struct {
+	mu    sync.Mutex
+	byID  map[uuid.UUID]database.Document
+	bySum map[string]uuid.UUID
+}
+
+func newFakeDocs() *fakeDocs {
+	return &fakeDocs{byID: map[uuid.UUID]database.Document{}, bySum: map[string]uuid.UUID{}}
+}
+
+func (f *fakeDocs) Create(_ context.Context, n database.NewDocument) (database.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if id, ok := f.bySum[n.SHA256]; ok {
+		return database.Document{}, &database.DuplicateError{ID: id}
+	}
+	d := database.Document{ID: n.ID, Filename: n.Filename, ObjectKey: n.ObjectKey, Status: database.StatusQueued, CreatedAt: time.Now()}
+	f.byID[n.ID], f.bySum[n.SHA256] = d, n.ID
+	return d, nil
+}
+
+func (f *fakeDocs) Get(_ context.Context, id uuid.UUID) (database.Document, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.byID[id]
+	if !ok {
+		return database.Document{}, database.ErrNotFound
+	}
+	return d, nil
+}
+
+type fakeObjects struct {
+	mu   sync.Mutex
+	objs map[string][]byte
+}
+
+func newFakeObjects() *fakeObjects { return &fakeObjects{objs: map[string][]byte{}} }
+
+func (f *fakeObjects) Put(_ context.Context, key, _ string, r io.Reader) error {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.objs[key] = b
+	return nil
+}
+
+func (f *fakeObjects) Delete(_ context.Context, key string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.objs, key)
+	return nil
+}
+
 func newTestRouter(t *testing.T, pingErr error) http.Handler {
 	t.Helper()
-	h, err := NewRouter(New(fakePinger{pingErr}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	return newRouterWith(t, Deps{DB: fakePinger{pingErr}})
+}
+
+// newRouterWith fills in a discarding logger and an empty store for deps left nil.
+func newRouterWith(t *testing.T, d Deps) http.Handler {
+	t.Helper()
+	if d.DB == nil {
+		d.DB = fakePinger{}
+	}
+	if d.Docs == nil {
+		d.Docs = newFakeDocs()
+	}
+	if d.Objects == nil {
+		d.Objects = newFakeObjects()
+	}
+	if d.MaxUpload == 0 {
+		d.MaxUpload = 1 << 20
+	}
+	d.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	h, err := NewRouter(New(d))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return h
-}
-
-func TestGetHealth(t *testing.T) {
-	tests := []struct {
-		name       string
-		pingErr    error
-		wantCode   int
-		wantStatus api.HealthStatus
-	}{
-		{"ok", nil, http.StatusOK, api.HealthStatusOk},
-		{"db down", errors.New("connection refused"), http.StatusServiceUnavailable, api.HealthStatusUnavailable},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			newTestRouter(t, tt.pingErr).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
-
-			if rec.Code != tt.wantCode {
-				t.Fatalf("status code = %d, want %d", rec.Code, tt.wantCode)
-			}
-			var body api.Health
-			if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-				t.Fatal(err)
-			}
-			if body.Status != tt.wantStatus {
-				t.Errorf("status = %q, want %q", body.Status, tt.wantStatus)
-			}
-		})
-	}
 }
 
 func TestUnknownRouteIsNotFound(t *testing.T) {

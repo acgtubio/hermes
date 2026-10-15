@@ -10,14 +10,42 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
+	"github.com/oapi-codegen/runtime"
+	openapi_types "github.com/oapi-codegen/runtime/types"
 )
+
+// Defines values for DocumentStatus.
+const (
+	DocumentStatusFailed     DocumentStatus = "failed"
+	DocumentStatusProcessing DocumentStatus = "processing"
+	DocumentStatusQueued     DocumentStatus = "queued"
+	DocumentStatusReady      DocumentStatus = "ready"
+)
+
+// Valid indicates whether the value is a known member of the DocumentStatus enum.
+func (e DocumentStatus) Valid() bool {
+	switch e {
+	case DocumentStatusFailed:
+		return true
+	case DocumentStatusProcessing:
+		return true
+	case DocumentStatusQueued:
+		return true
+	case DocumentStatusReady:
+		return true
+	default:
+		return false
+	}
+}
 
 // Defines values for HealthStatus.
 const (
@@ -37,6 +65,31 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// Document defines model for Document.
+type Document struct {
+	CreatedAt time.Time `json:"created_at"`
+
+	// Error Why processing failed (status failed)
+	Error    *string            `json:"error,omitempty"`
+	Filename string             `json:"filename"`
+	Id       openapi_types.UUID `json:"id"`
+
+	// NeedsReviewCount Rows with a cell that failed its check or was inferred rather than read
+	NeedsReviewCount *int           `json:"needs_review_count,omitempty"`
+	PageCount        *int           `json:"page_count,omitempty"`
+	ProcessedAt      *time.Time     `json:"processed_at,omitempty"`
+	RowCount         *int           `json:"row_count,omitempty"`
+	Status           DocumentStatus `json:"status"`
+}
+
+// DocumentStatus defines model for Document.Status.
+type DocumentStatus string
+
+// Error defines model for Error.
+type Error struct {
+	Message string `json:"message"`
+}
+
 // Health defines model for Health.
 type Health struct {
 	Error  *string      `json:"error,omitempty"`
@@ -46,8 +99,22 @@ type Health struct {
 // HealthStatus defines model for Health.Status.
 type HealthStatus string
 
+// CreateDocumentMultipartBody defines parameters for CreateDocument.
+type CreateDocumentMultipartBody struct {
+	File openapi_types.File `json:"file"`
+}
+
+// CreateDocumentMultipartRequestBody defines body for CreateDocument for multipart/form-data ContentType.
+type CreateDocumentMultipartRequestBody CreateDocumentMultipartBody
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
+	// CreateDocument Upload an SOA PDF and queue it for processing
+	// (POST /documents)
+	CreateDocument(w http.ResponseWriter, r *http.Request)
+	// GetDocument A document's processing status and row counts
+	// (GET /documents/{id})
+	GetDocument(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
 	// GetHealth Report service and database health
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -56,6 +123,18 @@ type ServerInterface interface {
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
 
 type Unimplemented struct{}
+
+// CreateDocument Upload an SOA PDF and queue it for processing
+// (POST /documents)
+func (_ Unimplemented) CreateDocument(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GetDocument A document's processing status and row counts
+// (GET /documents/{id})
+func (_ Unimplemented) GetDocument(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
 
 // GetHealth Report service and database health
 // (GET /health)
@@ -71,6 +150,46 @@ type ServerInterfaceWrapper struct {
 }
 
 type MiddlewareFunc func(http.Handler) http.Handler
+
+// CreateDocument operation middleware
+func (siw *ServerInterfaceWrapper) CreateDocument(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateDocument(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetDocument operation middleware
+func (siw *ServerInterfaceWrapper) GetDocument(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetDocument(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
 
 // GetHealth operation middleware
 func (siw *ServerInterfaceWrapper) GetHealth(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +321,130 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/health", wrapper.GetHealth)
 	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/documents", wrapper.CreateDocument)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/documents/{id}", wrapper.GetDocument)
+	})
 
 	return r
+}
+
+type ErrorJSONResponse Error
+
+type CreateDocumentRequestObject struct {
+	Body *multipart.Reader
+}
+
+type CreateDocumentResponseObject interface {
+	VisitCreateDocumentResponse(w http.ResponseWriter) error
+}
+
+type CreateDocument202JSONResponse Document
+
+func (response CreateDocument202JSONResponse) VisitCreateDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(202)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateDocument400JSONResponse struct{ ErrorJSONResponse }
+
+func (response CreateDocument400JSONResponse) VisitCreateDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateDocument409JSONResponse Error
+
+func (response CreateDocument409JSONResponse) VisitCreateDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateDocument413JSONResponse Error
+
+func (response CreateDocument413JSONResponse) VisitCreateDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(413)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateDocument415JSONResponse Error
+
+func (response CreateDocument415JSONResponse) VisitCreateDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(415)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetDocumentRequestObject struct {
+	Id openapi_types.UUID `json:"id"`
+}
+
+type GetDocumentResponseObject interface {
+	VisitGetDocumentResponse(w http.ResponseWriter) error
+}
+
+type GetDocument200JSONResponse Document
+
+func (response GetDocument200JSONResponse) VisitGetDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetDocument404JSONResponse struct{ ErrorJSONResponse }
+
+func (response GetDocument404JSONResponse) VisitGetDocumentResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
 }
 
 type GetHealthRequestObject struct {
@@ -243,6 +484,12 @@ func (response GetHealth503JSONResponse) VisitGetHealthResponse(w http.ResponseW
 
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
+	// CreateDocument Upload an SOA PDF and queue it for processing
+	// (POST /documents)
+	CreateDocument(ctx context.Context, request CreateDocumentRequestObject) (CreateDocumentResponseObject, error)
+	// GetDocument A document's processing status and row counts
+	// (GET /documents/{id})
+	GetDocument(ctx context.Context, request GetDocumentRequestObject) (GetDocumentResponseObject, error)
 	// GetHealth Report service and database health
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -287,6 +534,63 @@ type strictHandler struct {
 	options     StrictHTTPServerOptions
 }
 
+// CreateDocument operation middleware
+func (sh *strictHandler) CreateDocument(w http.ResponseWriter, r *http.Request) {
+	var request CreateDocumentRequestObject
+
+	if reader, err := r.MultipartReader(); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode multipart body: %w", err))
+		return
+	} else {
+		request.Body = reader
+	}
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.CreateDocument(ctx, request.(CreateDocumentRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateDocument")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateDocumentResponseObject); ok {
+		if err := validResponse.VisitCreateDocumentResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetDocument operation middleware
+func (sh *strictHandler) GetDocument(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	var request GetDocumentRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetDocument(ctx, request.(GetDocumentRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetDocument")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetDocumentResponseObject); ok {
+		if err := validResponse.VisitGetDocumentResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetHealth operation middleware
 func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	var request GetHealthRequestObject
@@ -316,12 +620,21 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"vJHBzpswEIRfBU17REAb9eJbTk1uVXuMcnDMJjgF210vkVDEu1cLtPn1P8B/8gpmvN+Mn3BxSDFQkAzz",
-	"RHYdDXYZD2R76XRKHBOxeFq+E3NkHWRKBIMs7MMNc4ksVsZVE8YB5oT4GyXGYB/W9/bSE87le9tcgunP",
-	"6JladWx3vHTxcicnmFXowzUum730+u9APFAu9j+OKPEgzj4GGDTVl6pRoJgo2ORhsKuaaocSyUq3ENbd",
-	"/3g3Ej00oxUfw7GFwXeSrQDlyymGvMb/2jR6uBiEwmK0KfXeLdb6npXgX486fWa6wuBT/Sq63lqutw1L",
-	"tpayY59kjfCL+OEdFT4XK+ikeb41uw/YvS9aShRaCm5SgLfvp+o8DoPlCQY/KUWWIm+wNrRFa8VebKYN",
-	"e71fBcQZ5vTEyD0Man2W+Tz/DQAA//8=",
+	"vFZRb9tGDP4rBDdgG6DaTtM+THvK2m3tU4N0wx66ILjoaOsa6e7Ko2IYgf/7wJMsW7W7rMPaN8mkSN73",
+	"ffzOD1iFNgZPXhKWD8iUYvCJ8ssvzIH1oQpeyIs+mhgbVxlxwc/fp+D1t1TV1Bp9+pZpiSV+M99XnffR",
+	"NO+rbbfbAi2lil3UIljiLlAMhXLvl6Hq2qFn5BCJxfVTVUxGyN6YHFsGbvUJrRF6Iq4lLFA2kbDEJOz8",
+	"CrcF0u4k085/1huIHCpKyfkVLI1ryML3SYx0aXj94VS9pWvIm5a05FHQ2clgXefsqRqeyKYbpntH65sq",
+	"dP1ZpwNehXWCtZMaDFTUNCC1kd2cThJUNVV3EBjWJoHzS2ImC2ykJtZkD0zmoL3zQiti7R/NivZ9T8R7",
+	"YD4TaQ7rfyraQ6sx8l2L5Tv80FFHOuGeCCxQp95ggf1R8fqok7aiD51jslolQzyyMvYpDtWyLxJu31Ml",
+	"Os8o8anGWkrJrE7R+1HfXeKp2q/INFIfFx/FeATeMTrhDgvsvLk3rjG3DT2OxFDjeCBNdH4ZcmcnjcZe",
+	"EbeU4OLyNRZ4T5x62S1mZ7OFDhQieRMdlng+W8zOlSUjdZ5wbocNzW8xpBPyfSuBKYHUBJcvfwXjLWS6",
+	"EziBZeAcefPiCqKL1DhPBaxrV9Ug5o4SGGid74RU37IOM7gMTQMrkp05QOfFNTDsq0tZ7BtN73Uz+8tj",
+	"PgRnw3ptscQXWRCjvfTgUZKfg9185HVt14iLhmWu2n9ijZip3U15VflNFuXWecMbfIyx/N1pvvZpwh3l",
+	"Hw78+eni6f/mziMgJww602j39FmVxrPF4lM1xyF3nq/ZP375i+T3miCZlkARzY5oml4RXWyCsWR/yoob",
+	"lhbUK1K20Z2WwfVnOzv/nLOdPf/X2brkXduqLEr8I08FxsPbNxfTDdktyIEp6rf7pZs/OLvVtivKcE5F",
+	"/tt+R/LOsmlJiBOW7x7QKVa6x1hgf4n19jkVW3HAxiN32fb6SJiLryJMJdyOcVXZs//GxMVY5rt0+I9g",
+	"cBalhcMa8sWWeibq0d0/xcDg/18Qm6HDqZUlvncVqSf2g24Un+eL86/Q+wIsRfKWfLXRAQ6vrynsVxQD",
+	"C6RhWIVZTfbWJBrG7utrwk69HTdY4lxvpe319u8AAAD//w==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

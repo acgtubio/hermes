@@ -1,0 +1,517 @@
+{
+ "page_count": 28,
+ "pages": [
+  {
+   "page": 4,
+   "rows": [
+    {
+     "row_index": 8,
+     "cells": {
+      "doc_date": {
+       "text": "12.09.2026",
+       "conf": 90.6,
+       "bbox": [
+        4,
+        924,
+        168,
+        948
+       ],
+       "status": "ok"
+      },
+      "po_number": {
+       "text": "4602107138",
+       "conf": 95.2,
+       "bbox": [
+        233,
+        925,
+        417,
+        949
+       ],
+       "status": "ok"
+      },
+      "service_entry_sheet": {
+       "text": "1010612331",
+       "conf": 95.9,
+       "bbox": [
+        447,
+        925,
+        623,
+        949
+       ],
+       "status": "ok"
+      },
+      "reference_no": {
+       "text": "B648724-MAI",
+       "conf": 44.6,
+       "bbox": [
+        704,
+        925,
+        905,
+        949
+       ],
+       "status": "ok"
+      },
+      "doc_header_text": {
+       "text": "2727",
+       "conf": 96.2,
+       "bbox": [
+        1025,
+        925,
+        1097,
+        949
+       ],
+       "status": "ok"
+      },
+      "text": {
+       "text": "FF PHV20 1 TRIP - F3425S1 173 KM ()",
+       "conf": 24.4,
+       "bbox": [
+        1169,
+        925,
+        1659,
+        1003
+       ],
+       "status": "unchecked"
+      },
+      "sales": {
+       "text": "2,448.70",
+       "conf": 92.5,
+       "bbox": [
+        1826,
+        925,
+        1954,
+        953
+       ],
+       "status": "ok"
+      },
+      "vat": {
+       "text": "0.00",
+       "conf": 93.1,
+       "bbox": [
+        2134,
+        925,
+        2197,
+        949
+       ],
+       "status": "ok"
+      },
+      "total_sales_w_vat": {
+       "text": "2,448.70",
+       "conf": 92.5,
+       "bbox": [
+        2308,
+        925,
+        2437,
+        952
+       ],
+       "status": "ok"
+      },
+      "withholding_tax": {
+       "text": "48.97",
+       "conf": 93.0,
+       "bbox": [
+        2596,
+        924,
+        2678,
+        948
+       ],
+       "status": "ok"
+      },
+      "net_amount": {
+       "text": "2,399.73",
+       "conf": 92.0,
+       "bbox": [
+        2852,
+        923,
+        2979,
+        951
+       ],
+       "status": "ok"
+      }
+     }
+    },
+    {
+     "row_index": 9,
+     "cells": {
+      "doc_date": {
+       "text": "12.09.2026",
+       "conf": 90.5,
+       "bbox": [
+        4,
+        1029,
+        168,
+        1053
+       ],
+       "status": "ok"
+      },
+      "po_number": {
+       "text": "4602107138",
+       "conf": 93.0,
+       "bbox": [
+        233,
+        1030,
+        418,
+        1054
+       ],
+       "status": "ok"
+      },
+      "service_entry_sheet": {
+       "text": "1010612333",
+       "conf": 93.0,
+       "bbox": [
+        448,
+        1030,
+        628,
+        1054
+       ],
+       "status": "ok"
+      },
+      "reference_no": {
+       "text": "B648724-MAIA",
+       "conf": 89.7,
+       "bbox": [
+        693,
+        1030,
+        919,
+        1054
+       ],
+       "status": "ok"
+      },
+      "doc_header_text": {
+       "text": "2727",
+       "conf": 96.1,
+       "bbox": [
+        1025,
+        1030,
+        1097,
+        1054
+       ],
+       "status": "ok"
+      },
+      "text": {
+       "text": "FF PHV20 EXESS - F3425SI 83 KM ()",
+       "conf": 11.3,
+       "bbox": [
+        1170,
+        1030,
+        1648,
+        1107
+       ],
+       "status": "unchecked"
+      },
+      "sales": {
+       "text": "2,248.64",
+       "conf": 91.3,
+       "bbox": [
+        1826,
+        1030,
+        1955,
+        1057
+       ],
+       "status": "ok"
+      },
+      "vat": {
+       "text": "0.00",
+       "conf": 93.2,
+       "bbox": [
+        2135,
+        1030,
+        2197,
+        1054
+       ],
+       "status": "ok"
+      },
+      "total_sales_w_vat": {
+       "text": "2,248.64",
+       "conf": 92.4,
+       "bbox": [
+        2309,
+        1029,
+        2438,
+        1057
+       ],
+       "status": "ok"
+      },
+      "withholding_tax": {
+       "text": "44.97",
+       "conf": 48.6,
+       "bbox": [
+        2597,
+        1029,
+        2679,
+        1053
+       ],
+       "first_read": "44 97",
+       "status": "inferred"
+      },
+      "net_amount": {
+       "text": "2,203.67",
+       "conf": 92.1,
+       "bbox": [
+        2852,
+        1028,
+        2980,
+        1056
+       ],
+       "status": "ok"
+      }
+     }
+    }
+   ],
+   "subtotals": [
+    {
+     "after_row": 11,
+     "cells": {
+      "sales": {
+       "text": "66,917.66",
+       "conf": 92.7,
+       "bbox": [
+        1809,
+        1342,
+        1956,
+        1370
+       ],
+       "status": "ok"
+      },
+      "vat": {
+       "text": "0.00",
+       "conf": 91.1,
+       "bbox": [
+        2136,
+        1342,
+        2198,
+        1366
+       ],
+       "status": "ok"
+      },
+      "total_sales_w_vat": {
+       "text": "66,917.66",
+       "conf": 91.7,
+       "bbox": [
+        2292,
+        1342,
+        2439,
+        1370
+       ],
+       "status": "ok"
+      },
+      "withholding_tax": {
+       "text": "1,338.30",
+       "conf": 90.8,
+       "bbox": [
+        2554,
+        1341,
+        2680,
+        1370
+       ],
+       "status": "ok"
+      },
+      "net_amount": {
+       "text": "65,579.36",
+       "conf": 93.0,
+       "bbox": [
+        2836,
+        1340,
+        2982,
+        1369
+       ],
+       "status": "ok"
+      }
+     }
+    }
+   ],
+   "footer": {
+    "sales": {
+     "text": "98,379.54",
+     "conf": 92.4,
+     "bbox": [
+      1811,
+      1967,
+      1958,
+      1995
+     ],
+     "status": "ok"
+    },
+    "vat": {
+     "text": "0.00",
+     "conf": 91.4,
+     "bbox": [
+      2138,
+      1967,
+      2200,
+      1991
+     ],
+     "status": "ok"
+    },
+    "total_sales_w_vat": {
+     "text": "98,379.54",
+     "conf": 90.8,
+     "bbox": [
+      2294,
+      1967,
+      2442,
+      1994
+     ],
+     "status": "ok"
+    },
+    "withholding_tax": {
+     "text": "1,967.52",
+     "conf": 92.0,
+     "bbox": [
+      2557,
+      1966,
+      2684,
+      1994
+     ],
+     "status": "ok"
+    },
+    "net_amount": {
+     "text": "96,412.02",
+     "conf": 91.0,
+     "bbox": [
+      2840,
+      1965,
+      2986,
+      1993
+     ],
+     "status": "ok"
+    }
+   }
+  },
+  {
+   "page": 17,
+   "rows": [
+    {
+     "row_index": 5,
+     "cells": {
+      "doc_date": {
+       "text": "18.06.2026",
+       "conf": 92.3,
+       "bbox": [
+        4,
+        666,
+        167,
+        691
+       ],
+       "status": "ok"
+      },
+      "po_number": {
+       "text": "4601996716",
+       "conf": 94.6,
+       "bbox": [
+        233,
+        667,
+        417,
+        692
+       ],
+       "status": "ok"
+      },
+      "service_entry_sheet": {
+       "text": "1010233975",
+       "conf": 95.3,
+       "bbox": [
+        447,
+        668,
+        627,
+        692
+       ],
+       "status": "ok"
+      },
+      "reference_no": {
+       "text": "B513044-MAIA",
+       "conf": 90.3,
+       "bbox": [
+        692,
+        668,
+        917,
+        693
+       ],
+       "status": "ok"
+      },
+      "doc_header_text": {
+       "text": "3088",
+       "conf": 86.0,
+       "bbox": [
+        1023,
+        669,
+        1096,
+        693
+       ],
+       "status": "ok"
+      },
+      "text": {
+       "text": "FF PHV20 EXESS - F0925SE 58.2 KM ()",
+       "conf": 88.9,
+       "bbox": [
+        1167,
+        669,
+        1612,
+        747
+       ],
+       "status": "unchecked"
+      },
+      "sales": {
+       "text": "1,5676.75",
+       "conf": 28.5,
+       "bbox": [
+        1828,
+        670,
+        1953,
+        698
+       ],
+       "status": "failed"
+      },
+      "vat": {
+       "text": "0.00",
+       "conf": 93.2,
+       "bbox": [
+        2133,
+        670,
+        2196,
+        694
+       ],
+       "status": "failed"
+      },
+      "total_sales_w_vat": {
+       "text": "1,676.75",
+       "conf": 85.4,
+       "bbox": [
+        2309,
+        670,
+        2435,
+        698
+       ],
+       "status": "failed"
+      },
+      "withholding_tax": {
+       "text": "31.54",
+       "conf": 91.8,
+       "bbox": [
+        2595,
+        670,
+        2676,
+        694
+       ],
+       "status": "failed"
+      },
+      "net_amount": {
+       "text": "1,545.21",
+       "conf": 91.9,
+       "bbox": [
+        2850,
+        671,
+        2971,
+        699
+       ],
+       "status": "failed"
+      }
+     }
+    }
+   ],
+   "subtotals": [],
+   "footer": null
+  }
+ ],
+ "flags": [],
+ "totals": []
+}

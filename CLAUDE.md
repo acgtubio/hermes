@@ -15,7 +15,7 @@ Run from `hermes-web/`:
 
 ```sh
 go generate ./...                                   # regenerate internal/api/api.gen.go from api/openapi.yaml
-HERMES_DATABASE_URL=postgres://... go run ./cmd/api  # serves on :8080
+HERMES_DATABASE_URL=postgres://... HERMES_S3_ACCESS_KEY=... HERMES_S3_SECRET_KEY=... go run ./cmd/api  # serves on :8080
 go test ./...
 go test ./internal/server -run TestGetHealth         # single test
 ```
@@ -26,7 +26,8 @@ The API is spec-first with oapi-codegen's strict server:
 - To add an endpoint:
   1. Edit the spec.
   2. Run `go generate ./...`.
-  3. Implement the new method on `*server.Server` in `internal/server/handlers.go`. The compile-time assertion `var _ api.StrictServerInterface` fails the build until you do.
+  3. Implement the new method on `*server.Server` in its own file, named after the operation: `internal/server/<operation>.go`, e.g. `get_document.go`. Put its tests in `<operation>_test.go`. The compile-time assertion `var _ api.StrictServerInterface` in `handlers.go` fails the build until you do.
+- `internal/server/handlers.go` holds what the handlers share: `Server`, `Deps`, `New`, the dependency interfaces and `toAPI`. Shared test fakes go in `handlers_test.go`.
 - Never hand-edit `api.gen.go`.
 - Enum constants are type-prefixed, e.g. `api.HealthStatusOk`.
 
@@ -35,12 +36,44 @@ Request flow:
 - `internal/server.NewRouter` mounts the generated handlers under `/api` on chi.
 - Requests are validated against the embedded spec by `nethttp-middleware`. Its `Prefix: "/api"` option stands in for the spec's `servers` entry.
 - `/api/openapi.json` serves the embedded spec.
+- `POST /api/documents` skips request-body validation (`uploadRoute` in `handlers.go`), because kin-openapi `io.ReadAll`s the body and uploads are up to `HERMES_MAX_UPLOAD_MB`. The handler streams the multipart part straight to object storage instead. Every other route is validated in full.
+
+Document processing:
+1. The browser uploads a PDF to `POST /api/documents`. The handler streams it to `documents/<id>.pdf` in the bucket, hashing as it goes. It inserts a `queued` row in `documents` and returns `202`. The same SHA-256 uploaded again returns `409`.
+2. `internal/worker` runs in-process. It claims the oldest queued document (`FOR UPDATE SKIP LOCKED`) and hands the sidecar (`hermes-cv/server.py`) a 15-minute presigned GET URL.
+3. It stores the result in one transaction (`soa_rows`, `soa_totals`) and marks the document `ready`. If the pipeline errors, the document is marked `failed` with the error.
+4. The browser polls `GET /api/documents/{id}`.
+
+Details:
+- The `documents` table is the queue; there's no Redis. One document runs at a time, because the pipeline already uses every core.
+- If the sidecar is busy (`503`) or down, the document is requeued and retried every 10 s.
+- At startup, `RequeueStale` requeues documents left `processing`. That assumes a single API instance.
+- `internal/pipeline` converts the sidecar's JSON to `soa` types:
+  - Typed columns are NULL when a cell is `failed` or doesn't parse. The raw cell (`text`, `conf`, `bbox`, `status`, `first_read`) is always kept in the `cells` JSONB.
+  - `needs_review` means a cell failed or was inferred.
+  - The amount format rule matches `validate.num` in hermes-cv. Keep them in step.
+
+Database and storage:
+- Migrations are goose SQL files in `internal/database/migrations/NNNNN_name.sql`. They're embedded and applied at startup by `database.Migrate`.
+- Object storage goes through `internal/storage`, which uses only the plain S3 API through minio-go. Keep it that way: MinIO's free distribution has been scaled back (images are no longer pullable from Docker Hub or quay.io). RustFS, Garage, SeaweedFS and AWS S3 all work as replacements. For dev, `docker.io/rustfs/rustfs` with `RUSTFS_ACCESS_KEY`/`RUSTFS_SECRET_KEY` works on :9000.
+- Presigned URLs are signed for `HERMES_S3_ENDPOINT`'s host, so the sidecar must reach the store under that same name.
 
 Configuration:
-- Config is owned by the binary: `cmd/api/config.go`, using envconfig with the `HERMES_` prefix. The variables are `HERMES_PORT` (8080), `HERMES_DATABASE_URL` (required), `HERMES_SHUTDOWN_TIMEOUT` (10s) and `HERMES_LOG_LEVEL` (info).
+- Config is owned by the binary: `cmd/api/config.go`, using envconfig with the `HERMES_` prefix. The variables are:
+  - `HERMES_PORT` (8080)
+  - `HERMES_DATABASE_URL` (required)
+  - `HERMES_SHUTDOWN_TIMEOUT` (10s)
+  - `HERMES_LOG_LEVEL` (info)
+  - `HERMES_S3_ENDPOINT` (localhost:9000)
+  - `HERMES_S3_ACCESS_KEY`, `HERMES_S3_SECRET_KEY` (required)
+  - `HERMES_S3_BUCKET` (hermes-documents; created if missing)
+  - `HERMES_S3_USE_SSL` (false)
+  - `HERMES_PIPELINE_URL` (http://localhost:8090)
+  - `HERMES_PIPELINE_TIMEOUT` (10m)
+  - `HERMES_MAX_UPLOAD_MB` (100)
 - Internal packages must not import config. They take plain values such as `database.New(ctx, url)`.
-- To add a new dependency (e.g. Redis): add a config field, construct the client in `main.go`, and pass it into `server.New`.
-- Handlers depend on small interfaces (e.g. `server.Pinger`) rather than `*pgxpool.Pool`, so tests can use fakes.
+- To add a new dependency (e.g. Redis): add a config field, construct the client in `main.go`, and pass it into `server.New` through `server.Deps`.
+- Handlers and the worker depend on small interfaces rather than concrete clients, so tests can use fakes. Examples: `server.Pinger`, `server.DocumentStore`, `server.ObjectStore`, `worker.Queue`.
 
 ## hermes-web/web (frontend)
 
@@ -61,10 +94,17 @@ It processes one document type: the vendor's Statement of Account (SOA). Page 1 
 
 Install with `pip install -r requirements.txt`; the `tesseract` binary must also be on PATH.
 
-`python run.py <doc.pdf|scan.png> [outdir]` runs everything:
+`python run.py <doc.pdf|scan.png> [outdir]` runs everything (`run.process`):
 - It writes each page's intermediates to `<outdir>/page-NN/` (default `out/`).
 - It skips pages with no table rows (the cover).
 - It validates totals across pages.
+- It writes the whole document to `<outdir>/document.json`: `{page_count, pages: [{page, rows, subtotals, footer}], flags, totals}`.
+
+`python server.py` is the sidecar the Go API calls. It listens on `HERMES_PIPELINE_PORT`, default 8090.
+- `POST /process {"url": ...}` downloads the PDF from the presigned URL and returns `run.process`'s document.
+- It handles one job at a time and returns `503` while busy.
+- A caller that disconnects doesn't cancel the job in progress.
+- It holds no storage credentials.
 
 The stage scripts can also be run one at a time. Run them in order from one working directory; each stage hands off to the next through files in the current directory:
 

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
@@ -27,28 +28,47 @@ func NewRouter(s *Server) (http.Handler, error) {
 	spec.Servers = nil
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, requestLogger(s.log), middleware.Recoverer)
+	r.Use(middleware.RequestID, middleware.RealIP, requestLogger(s.Log), middleware.Recoverer)
 
 	r.Route(apiPrefix, func(r chi.Router) {
 		r.Get("/openapi.json", serveSpec)
 		r.Group(func(r chi.Router) {
-			r.Use(nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
-				Prefix:               apiPrefix,
-				DoNotValidateServers: true,
-			}))
+			validator := func(skipBody bool) func(http.Handler) http.Handler {
+				return nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
+					Options:              openapi3filter.Options{ExcludeRequestBody: skipBody},
+					Prefix:               apiPrefix,
+					DoNotValidateServers: true,
+				})
+			}
+			r.Use(selectMiddleware(uploadRoute, validator(true), validator(false)))
 			api.HandlerFromMux(api.NewStrictHandler(s, nil), r)
 		})
 	})
 	return r, nil
 }
 
-// NewHTTPServer wraps the router in an http.Server with conservative timeouts.
+// selectMiddleware applies a to requests matching pick and b to the rest.
+func selectMiddleware(pick func(*http.Request) bool, a, b func(http.Handler) http.Handler) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		ha, hb := a(next), b(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if pick(r) {
+				ha.ServeHTTP(w, r)
+			} else {
+				hb.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
+// NewHTTPServer wraps the router in an http.Server with conservative timeouts. ReadTimeout covers
+// the whole request body, so it allows a large PDF upload over a slow link.
 func NewHTTPServer(port int, h http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
 		Handler:           h,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
+		ReadTimeout:       5 * time.Minute,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}

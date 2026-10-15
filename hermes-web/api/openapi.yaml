@@ -22,8 +22,100 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Health"
+  /documents:
+    post:
+      operationId: createDocument
+      summary: Upload an SOA PDF and queue it for processing
+      description: >
+        Stores the PDF and queues it for the OCR pipeline, which takes a minute or two.
+        Poll getDocument until status is ready or failed.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "202":
+          description: Stored and queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: The same file was already uploaded; the message names its document id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+        "415":
+          $ref: "#/components/responses/Error"
+  /documents/{id}:
+    get:
+      operationId: getDocument
+      summary: A document's processing status and row counts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The document
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "404":
+          $ref: "#/components/responses/Error"
 components:
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
   schemas:
+    Document:
+      type: object
+      required: [id, filename, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [queued, processing, ready, failed]
+        error:
+          type: string
+          description: Why processing failed (status failed)
+        page_count:
+          type: integer
+        row_count:
+          type: integer
+        needs_review_count:
+          type: integer
+          description: Rows with a cell that failed its check or was inferred rather than read
+        created_at:
+          type: string
+          format: date-time
+        processed_at:
+          type: string
+          format: date-time
     Health:
       type: object
       required: [status]
