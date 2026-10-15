@@ -32,6 +32,8 @@ venv/
 hermes-cv/norm.png
 hermes-cv/words.csv
 hermes-cv/rows.json
+hermes-cv/table.json
+hermes-cv/out/
 # Input scans (financial documents) — keep out of git
 hermes-cv/scans/
 hermes-cv/*.png
@@ -40,3 +42,4 @@ hermes-cv/*.jpeg
 hermes-cv/*.tif
 hermes-cv/*.tiff
 hermes-cv/*.pdf
+hermes-cv/sample-files/*.pdf

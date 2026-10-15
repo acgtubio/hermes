@@ -5,14 +5,34 @@ def osd_rotation(path):
     m = re.search(r"Rotate: (\d+)", out)
     return int(m.group(1)) if m else 0
 
-def deskew_angle(gray):
-    bw = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 25, 15)
-    horiz = cv2.morphologyEx(bw, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (gray.shape[1] // 8, 1)))
-    lines = cv2.HoughLinesP(horiz, 1, np.pi / 1800, 200, minLineLength=gray.shape[1] // 4, maxLineGap=20)
-    if lines is None:
-        return 0.0
-    angs = [np.degrees(np.arctan2(y2 - y1, x2 - x1)) for x1, y1, x2, y2 in lines[:, 0]]
-    return float(np.median(angs))
+EDGE_BAND = 0.03  # fraction of the image along each edge where scanner shadows live
+
+def whiten_edges(gray, band=EDGE_BAND):
+    """Paint out scanner-edge shadows: dark blobs that touch the image border and stay within a thin
+    band along it. A table running off the page isn't one of these, since its blob spans the page."""
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(bw)
+    H, W = gray.shape
+    for i in range(1, n):
+        x, y, w, h = st[i, :4]
+        if (y == 0 or y + h == H) and h < band * H or (x == 0 or x + w == W) and w < band * W:
+            gray[lab == i] = 255
+    return gray
+
+def deskew_angle(gray, limit=5.0):
+    """Angle that makes text rows and rules horizontal: the rotation maximising the variance of the
+    horizontal ink profile (rows of text become sharp peaks). Works with or without ruling lines, on a
+    downscaled copy; coarse search, then refine around the best angle."""
+    small = cv2.resize(gray, None, fx=1000 / gray.shape[1], fy=1000 / gray.shape[1], interpolation=cv2.INTER_AREA)
+    _, bw = cv2.threshold(small, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    m = int(EDGE_BAND * bw.shape[0])
+    bw[:m], bw[-m:] = 0, 0  # shadow lines along the scan edge aren't parallel to the text
+    h, w = bw.shape
+    def score(a):
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), a, 1.0)
+        return cv2.warpAffine(bw, M, (w, h), flags=cv2.INTER_NEAREST).sum(1, dtype=np.float64).var()
+    best = max(np.arange(-limit, limit + 0.01, 0.25), key=score)
+    return float(max(np.arange(best - 0.25, best + 0.26, 0.02), key=score))
 
 def normalize(path):
     img = cv2.imread(path)
@@ -20,7 +40,7 @@ def normalize(path):
     codes = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
     if rot in codes:
         img = cv2.rotate(img, codes[rot])
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = whiten_edges(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
     ang = deskew_angle(gray)
     h, w = gray.shape
     M = cv2.getRotationMatrix2D((w / 2, h / 2), ang, 1.0)
