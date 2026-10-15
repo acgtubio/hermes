@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -75,11 +76,17 @@ type Document struct {
 	Id       openapi_types.UUID `json:"id"`
 
 	// NeedsReviewCount Rows with a cell that failed its check or was inferred rather than read
-	NeedsReviewCount *int           `json:"needs_review_count,omitempty"`
-	PageCount        *int           `json:"page_count,omitempty"`
-	ProcessedAt      *time.Time     `json:"processed_at,omitempty"`
-	RowCount         *int           `json:"row_count,omitempty"`
-	Status           DocumentStatus `json:"status"`
+	NeedsReviewCount *int `json:"needs_review_count,omitempty"`
+	PageCount        *int `json:"page_count,omitempty"`
+
+	// PagesDone Pages the pipeline has finished, of pages_total. Set while processing (0 once the pages are rendered) and kept once ready; absent while queued.
+	PagesDone *int `json:"pages_done,omitempty"`
+
+	// PagesTotal Pages in the PDF, known once processing has rendered them
+	PagesTotal  *int           `json:"pages_total,omitempty"`
+	ProcessedAt *time.Time     `json:"processed_at,omitempty"`
+	RowCount    *int           `json:"row_count,omitempty"`
+	Status      DocumentStatus `json:"status"`
 }
 
 // DocumentStatus defines model for Document.Status.
@@ -115,6 +122,9 @@ type ServerInterface interface {
 	// GetDocument A document's processing status and row counts
 	// (GET /documents/{id})
 	GetDocument(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
+	// StreamDocumentEvents Server-sent events with the document's status as it changes
+	// (GET /documents/{id}/events)
+	StreamDocumentEvents(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
 	// GetHealth Report service and database health
 	// (GET /health)
 	GetHealth(w http.ResponseWriter, r *http.Request)
@@ -133,6 +143,12 @@ func (_ Unimplemented) CreateDocument(w http.ResponseWriter, r *http.Request) {
 // GetDocument A document's processing status and row counts
 // (GET /documents/{id})
 func (_ Unimplemented) GetDocument(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// StreamDocumentEvents Server-sent events with the document's status as it changes
+// (GET /documents/{id}/events)
+func (_ Unimplemented) StreamDocumentEvents(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -182,6 +198,32 @@ func (siw *ServerInterfaceWrapper) GetDocument(w http.ResponseWriter, r *http.Re
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetDocument(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// StreamDocumentEvents operation middleware
+func (siw *ServerInterfaceWrapper) StreamDocumentEvents(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "id" -------------
+	var id openapi_types.UUID
+
+	err = runtime.BindStyledParameterWithOptions("simple", "id", chi.URLParam(r, "id"), &id, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "uuid", ValueIsUnescaped: r.URL.RawPath == ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.StreamDocumentEvents(w, r, id)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -327,6 +369,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/documents/{id}", wrapper.GetDocument)
 	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/documents/{id}/events", wrapper.StreamDocumentEvents)
+	})
 
 	return r
 }
@@ -447,6 +492,71 @@ func (response GetDocument404JSONResponse) VisitGetDocumentResponse(w http.Respo
 	return err
 }
 
+type StreamDocumentEventsRequestObject struct {
+	Id openapi_types.UUID `json:"id"`
+}
+
+type StreamDocumentEventsResponseObject interface {
+	VisitStreamDocumentEventsResponse(w http.ResponseWriter) error
+}
+
+type StreamDocumentEvents200TexteventStreamResponse struct {
+	Body          io.Reader
+	ContentLength int64
+}
+
+func (response StreamDocumentEvents200TexteventStreamResponse) VisitStreamDocumentEventsResponse(w http.ResponseWriter) error {
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	if response.ContentLength != 0 {
+		w.Header().Set("Content-Length", fmt.Sprint(response.ContentLength))
+	}
+	w.WriteHeader(200)
+
+	if closer, ok := response.Body.(io.ReadCloser); ok {
+		defer closer.Close()
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		// If w doesn't support flushing, fall back to io.Copy.
+		_, err := io.Copy(w, response.Body)
+		return err
+	}
+	// text/event-stream messages are typically small; use a
+	// modest buffer and flush after each chunk so clients see
+	// events immediately instead of waiting on OS buffering.
+	buf := make([]byte, 4096)
+	for {
+		n, err := response.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+}
+
+type StreamDocumentEvents404JSONResponse struct{ ErrorJSONResponse }
+
+func (response StreamDocumentEvents404JSONResponse) VisitStreamDocumentEventsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type GetHealthRequestObject struct {
 }
 
@@ -490,6 +600,9 @@ type StrictServerInterface interface {
 	// GetDocument A document's processing status and row counts
 	// (GET /documents/{id})
 	GetDocument(ctx context.Context, request GetDocumentRequestObject) (GetDocumentResponseObject, error)
+	// StreamDocumentEvents Server-sent events with the document's status as it changes
+	// (GET /documents/{id}/events)
+	StreamDocumentEvents(ctx context.Context, request StreamDocumentEventsRequestObject) (StreamDocumentEventsResponseObject, error)
 	// GetHealth Report service and database health
 	// (GET /health)
 	GetHealth(ctx context.Context, request GetHealthRequestObject) (GetHealthResponseObject, error)
@@ -591,6 +704,32 @@ func (sh *strictHandler) GetDocument(w http.ResponseWriter, r *http.Request, id 
 	}
 }
 
+// StreamDocumentEvents operation middleware
+func (sh *strictHandler) StreamDocumentEvents(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
+	var request StreamDocumentEventsRequestObject
+
+	request.Id = id
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.StreamDocumentEvents(ctx, request.(StreamDocumentEventsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StreamDocumentEvents")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(StreamDocumentEventsResponseObject); ok {
+		if err := validResponse.VisitStreamDocumentEventsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetHealth operation middleware
 func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 	var request GetHealthRequestObject
@@ -620,21 +759,28 @@ func (sh *strictHandler) GetHealth(w http.ResponseWriter, r *http.Request) {
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

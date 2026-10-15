@@ -79,6 +79,34 @@ paths:
                 $ref: "#/components/schemas/Document"
         "404":
           $ref: "#/components/responses/Error"
+  /documents/{id}/events:
+    get:
+      operationId: streamDocumentEvents
+      summary: Server-sent events with the document's status as it changes
+      description: >
+        A text/event-stream for EventSource. The first `document` event is the current state;
+        another follows each status change and, while processing, each finished page
+        (pages_done of pages_total). Every `document` event's data is a Document, the same
+        JSON as getDocument. Once the status is ready or failed, an `end` event follows and the
+        server closes the stream, so the client should close its EventSource rather than let it
+        reconnect. A reconnect (after a dropped connection) starts again from the current state.
+        Comment lines (": ping") are sent every 20 seconds to keep the connection open.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/Error"
 components:
   responses:
     Error:
@@ -105,6 +133,14 @@ components:
           description: Why processing failed (status failed)
         page_count:
           type: integer
+        pages_done:
+          type: integer
+          description: >
+            Pages the pipeline has finished, of pages_total. Set while processing (0 once the pages
+            are rendered) and kept once ready; absent while queued.
+        pages_total:
+          type: integer
+          description: Pages in the PDF, known once processing has rendered them
         row_count:
           type: integer
         needs_review_count:

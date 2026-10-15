@@ -34,6 +34,7 @@ type NewDocument struct {
 	ObjectKey string
 	SHA256    string
 	Size      int64
+	TraceID   string // of the upload request; "" if it had none
 }
 
 type Document struct {
@@ -45,6 +46,9 @@ type Document struct {
 	PageCount   *int
 	CreatedAt   time.Time
 	ProcessedAt *time.Time
+	TraceID     string
+	// Pipeline progress: set while processing (see SetProgress), cleared when (re)queued.
+	PagesDone, PagesTotal *int
 	// Set by Get once the document is ready.
 	RowCount, NeedsReviewCount *int
 }
@@ -55,20 +59,21 @@ type Documents struct{ pool *pgxpool.Pool }
 
 func NewDocuments(pool *pgxpool.Pool) *Documents { return &Documents{pool: pool} }
 
-const documentCols = `id, filename, object_key, status, error, page_count, created_at, processed_at`
+const documentCols = `id, filename, object_key, status, error, page_count, created_at, processed_at, coalesce(trace_id, ''), pages_done, pages_total`
 
 func scanDocument(row pgx.Row) (Document, error) {
 	var d Document
-	err := row.Scan(&d.ID, &d.Filename, &d.ObjectKey, &d.Status, &d.Error, &d.PageCount, &d.CreatedAt, &d.ProcessedAt)
+	err := row.Scan(&d.ID, &d.Filename, &d.ObjectKey, &d.Status, &d.Error, &d.PageCount, &d.CreatedAt, &d.ProcessedAt, &d.TraceID,
+		&d.PagesDone, &d.PagesTotal)
 	return d, err
 }
 
 // Create queues a new document. Returns *DuplicateError if its SHA-256 is already stored.
 func (s *Documents) Create(ctx context.Context, n NewDocument) (Document, error) {
 	d, err := scanDocument(s.pool.QueryRow(ctx, `
-		INSERT INTO documents (id, filename, object_key, sha256, size_bytes) VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO documents (id, filename, object_key, sha256, size_bytes, trace_id) VALUES ($1, $2, $3, $4, $5, nullif($6, ''))
 		ON CONFLICT (sha256) DO NOTHING
-		RETURNING `+documentCols, n.ID, n.Filename, n.ObjectKey, n.SHA256, n.Size))
+		RETURNING `+documentCols, n.ID, n.Filename, n.ObjectKey, n.SHA256, n.Size, n.TraceID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		var id uuid.UUID
 		if err := s.pool.QueryRow(ctx, `SELECT id FROM documents WHERE sha256 = $1`, n.SHA256).Scan(&id); err != nil {
@@ -105,7 +110,7 @@ func (s *Documents) Get(ctx context.Context, id uuid.UUID) (Document, error) {
 // queue is empty. SKIP LOCKED keeps concurrent claimers from taking the same document.
 func (s *Documents) ClaimNext(ctx context.Context) (Document, bool, error) {
 	d, err := scanDocument(s.pool.QueryRow(ctx, `
-		UPDATE documents SET status = 'processing'
+		UPDATE documents SET status = 'processing', pages_done = NULL, pages_total = NULL
 		WHERE id = (SELECT id FROM documents WHERE status = 'queued' ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
 		RETURNING `+documentCols))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -155,15 +160,25 @@ func (s *Documents) Fail(ctx context.Context, id uuid.UUID, msg string) error {
 	return err
 }
 
+// SetProgress records that pagesDone of pagesTotal pages are processed. Only a processing document
+// is updated, so a late report can't overwrite a finished or requeued one. The notify trigger turns
+// each update into an event-stream update.
+func (s *Documents) SetProgress(ctx context.Context, id uuid.UUID, pagesDone, pagesTotal int) error {
+	_, err := s.pool.Exec(ctx, `UPDATE documents SET pages_done = $2, pages_total = $3 WHERE id = $1 AND status = 'processing'`,
+		id, pagesDone, pagesTotal)
+	return err
+}
+
 // Requeue puts a claimed document back in the queue, e.g. when the pipeline was busy.
 func (s *Documents) Requeue(ctx context.Context, id uuid.UUID) error {
-	_, err := s.pool.Exec(ctx, `UPDATE documents SET status = 'queued' WHERE id = $1 AND status = 'processing'`, id)
+	_, err := s.pool.Exec(ctx, `UPDATE documents SET status = 'queued', pages_done = NULL, pages_total = NULL
+		WHERE id = $1 AND status = 'processing'`, id)
 	return err
 }
 
 // RequeueStale requeues documents left processing by a previous run that stopped mid-job.
 // Call it once at startup; it assumes a single API instance runs the worker.
 func (s *Documents) RequeueStale(ctx context.Context) (int64, error) {
-	tag, err := s.pool.Exec(ctx, `UPDATE documents SET status = 'queued' WHERE status = 'processing'`)
+	tag, err := s.pool.Exec(ctx, `UPDATE documents SET status = 'queued', pages_done = NULL, pages_total = NULL WHERE status = 'processing'`)
 	return tag.RowsAffected(), err
 }

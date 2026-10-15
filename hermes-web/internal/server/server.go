@@ -2,7 +2,6 @@ package server
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -10,8 +9,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	nethttpmiddleware "github.com/oapi-codegen/nethttp-middleware"
+	"go.uber.org/zap"
 
 	"github.com/acgtubio/hermes/internal/api"
+	"github.com/acgtubio/hermes/internal/logging"
+	"github.com/acgtubio/hermes/internal/trace"
 )
 
 const apiPrefix = "/api"
@@ -28,7 +30,7 @@ func NewRouter(s *Server) (http.Handler, error) {
 	spec.Servers = nil
 
 	r := chi.NewRouter()
-	r.Use(middleware.RequestID, middleware.RealIP, requestLogger(s.Log), middleware.Recoverer)
+	r.Use(traceIDs, middleware.RealIP, requestLogger(s.Log), middleware.Recoverer)
 
 	r.Route(apiPrefix, func(r chi.Router) {
 		r.Get("/openapi.json", serveSpec)
@@ -84,19 +86,34 @@ func serveSpec(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(b)
 }
 
-func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
+// TraceIDHeader returns the request's trace ID to the caller, so a failure can be found in the logs.
+const TraceIDHeader = "X-Trace-Id"
+
+// traceIDs gives each request a trace ID: the caller's, from a W3C traceparent header, or a new
+// one. It's put in the context (see logging.Ctx) and echoed in the X-Trace-Id response header.
+func traceIDs(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := trace.FromTraceparent(r.Header.Get(trace.Header))
+		if !ok {
+			id = trace.New()
+		}
+		w.Header().Set(TraceIDHeader, id)
+		next.ServeHTTP(w, r.WithContext(trace.WithID(r.Context(), id)))
+	})
+}
+
+func requestLogger(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			start := time.Now()
 			next.ServeHTTP(ww, r)
-			log.InfoContext(r.Context(), "request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", ww.Status(),
-				"bytes", ww.BytesWritten(),
-				"duration", time.Since(start),
-				"request_id", middleware.GetReqID(r.Context()),
+			logging.Ctx(r.Context(), log).Info("request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", ww.Status()),
+				zap.Int("bytes", ww.BytesWritten()),
+				zap.Duration("duration", time.Since(start)),
 			)
 		})
 	}

@@ -2,7 +2,7 @@
 Writes each stage's files to <outdir>/page-NN/ (same names as the single-page scripts), validates
 totals across pages, and writes the whole document to <outdir>/document.json."""
 import cv2, json, os, sys, time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import ingest, normalize, ocr_body, reread, rows, validate
 
 def run_page(d):
@@ -22,18 +22,33 @@ def run_page(d):
     return d, out, f"rotation {rot}, deskew {ang:.2f} deg, {len(out['rows'])} rows, {len(out['subtotals'])} subtotals, {len(fixes)} cells repaired" + "".join(
         f"\n    {where} {k}: {old!r} -> {new!r}" for where, k, old, new in fixes)
 
-def process(src, outdir, log=print):
+def process(src, outdir, log=print, on_progress=None):
     """Run every page of a PDF (or one scan) through the pipeline and validate totals across pages.
     Returns the document: {page_count, pages: [{page, rows, subtotals, footer}], flags, totals}, where
-    pages are the table pages, in rows.json's shapes. Also writes it to <outdir>/document.json."""
+    pages are the table pages, in rows.json's shapes. Also writes it to <outdir>/document.json.
+    on_progress(pages_done, page_count), if given, is called once the pages are rendered (with 0)
+    and again as each page finishes, in completion order."""
     images = ingest.page_images(src) if src.lower().endswith(".pdf") else [cv2.imread(src, 0)]
     dirs = []
     for n, img in enumerate(images, 1):
         d = os.path.join(outdir, f"page-{n:02d}"); os.makedirs(d, exist_ok=True)
         cv2.imwrite(os.path.join(d, "page.png"), img); dirs.append(d)
     t = time.time()
+    progress = on_progress or (lambda done, total: None)
+    progress(0, len(dirs))
+    results = [None] * len(dirs)
     with ProcessPoolExecutor() as ex:
-        results = list(ex.map(run_page, dirs))
+        futures = {ex.submit(run_page, d): i for i, d in enumerate(dirs)}
+        try:
+            for done, f in enumerate(as_completed(futures), 1):
+                results[futures[f]] = f.result()
+                progress(done, len(dirs))
+        except BaseException:  # e.g. the caller went away: stop OCRing pages nobody will read
+            # cancel_futures alone barely helps: the pool has already handed ~2x max_workers pages to
+            # its workers, and those can't be cancelled. Python 3.14+ can stop the workers outright.
+            stop = getattr(ex, "terminate_workers", None)
+            stop() if stop else ex.shutdown(cancel_futures=True)
+            raise
     pages = []
     for n, (d, out, note) in enumerate(results, 1):
         log(os.path.basename(d), "-", note if out else f"skipped ({note})")

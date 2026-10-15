@@ -6,14 +6,16 @@ package worker
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/acgtubio/hermes/internal/database"
+	"github.com/acgtubio/hermes/internal/logging"
 	"github.com/acgtubio/hermes/internal/pipeline"
 	"github.com/acgtubio/hermes/internal/soa"
+	"github.com/acgtubio/hermes/internal/trace"
 )
 
 // Queue is the subset of *database.Documents the worker needs.
@@ -22,10 +24,11 @@ type Queue interface {
 	Complete(ctx context.Context, id uuid.UUID, doc soa.Document) error
 	Fail(ctx context.Context, id uuid.UUID, msg string) error
 	Requeue(ctx context.Context, id uuid.UUID) error
+	SetProgress(ctx context.Context, id uuid.UUID, pagesDone, pagesTotal int) error
 }
 
 type Processor interface {
-	Process(ctx context.Context, pdfURL string) (soa.Document, error)
+	Process(ctx context.Context, pdfURL string, onProgress func(pipeline.Progress)) (soa.Document, error)
 }
 
 type Presigner interface {
@@ -42,11 +45,11 @@ type Worker struct {
 	queue   Queue
 	proc    Processor
 	objects Presigner
-	log     *slog.Logger
+	log     *zap.Logger
 	wake    chan struct{}
 }
 
-func New(q Queue, p Processor, objects Presigner, log *slog.Logger) *Worker {
+func New(q Queue, p Processor, objects Presigner, log *zap.Logger) *Worker {
 	return &Worker{queue: q, proc: p, objects: objects, log: log, wake: make(chan struct{}, 1)}
 }
 
@@ -66,7 +69,7 @@ func (w *Worker) Run(ctx context.Context) {
 		switch {
 		case err != nil:
 			if ctx.Err() == nil {
-				w.log.ErrorContext(ctx, "claim document", "err", err)
+				w.log.Error("claim document", zap.Error(err))
 			}
 			w.sleep(ctx, backoff, false)
 		case !ok:
@@ -77,36 +80,49 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// process handles one claimed document and reports whether it was requeued for a retry.
+// process handles one claimed document and reports whether it was requeued for a retry. It runs
+// under the upload request's trace ID, so its logs and the sidecar's line up with the upload's.
 func (w *Worker) process(ctx context.Context, doc database.Document) (retry bool) {
-	log := w.log.With("document_id", doc.ID)
-	log.InfoContext(ctx, "processing document", "filename", doc.Filename)
+	id := doc.TraceID
+	if id == "" { // uploaded before trace IDs were stored
+		id = trace.New()
+	}
+	ctx = trace.WithID(ctx, id)
+	log := logging.Ctx(ctx, w.log).With(zap.Stringer("document_id", doc.ID))
+	log.Info("processing document", zap.String("filename", doc.Filename))
 	start := time.Now()
 	url, err := w.objects.PresignGet(ctx, doc.ObjectKey, urlTTL)
 	var result soa.Document
 	if err == nil {
-		result, err = w.proc.Process(ctx, url)
+		result, err = w.proc.Process(ctx, url, func(p pipeline.Progress) {
+			// Stored, not just logged: the notify trigger turns it into an event-stream update on
+			// whichever instance the browser is connected to. A failed write only loses one update.
+			if err := w.queue.SetProgress(ctx, doc.ID, p.PagesDone, p.PageCount); err != nil && ctx.Err() == nil {
+				log.Warn("record progress", zap.Error(err))
+			}
+			log.Debug("progress", zap.Int("pages_done", p.PagesDone), zap.Int("pages_total", p.PageCount))
+		})
 	}
 	if ctx.Err() != nil {
 		return false
 	}
 	switch {
 	case errors.Is(err, pipeline.ErrRetryable):
-		log.WarnContext(ctx, "pipeline unavailable, requeueing", "err", err)
+		log.Warn("pipeline unavailable, requeueing", zap.Error(err))
 		if err := w.queue.Requeue(ctx, doc.ID); err != nil {
-			log.ErrorContext(ctx, "requeue document", "err", err)
+			log.Error("requeue document", zap.Error(err))
 		}
 		return true
 	case err == nil:
 		err = w.queue.Complete(ctx, doc.ID, result)
 		if err == nil {
-			log.InfoContext(ctx, "document ready", "rows", len(result.Rows), "duration", time.Since(start))
+			log.Info("document ready", zap.Int("rows", len(result.Rows)), zap.Duration("duration", time.Since(start)))
 			return false
 		}
 	}
-	log.ErrorContext(ctx, "document failed", "err", err)
+	log.Error("document failed", zap.Error(err))
 	if err := w.queue.Fail(ctx, doc.ID, err.Error()); err != nil {
-		log.ErrorContext(ctx, "mark document failed", "err", err)
+		log.Error("mark document failed", zap.Error(err))
 	}
 	return false
 }

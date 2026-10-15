@@ -4,21 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/acgtubio/hermes/internal/database"
 	"github.com/acgtubio/hermes/internal/pipeline"
 	"github.com/acgtubio/hermes/internal/soa"
+	"github.com/acgtubio/hermes/internal/trace"
 )
 
 type fakeQueue struct {
 	completed, failed, requeued []uuid.UUID
 	failMsg                     string
+	progress                    []pipeline.Progress
+}
+
+func (q *fakeQueue) SetProgress(_ context.Context, _ uuid.UUID, done, total int) error {
+	q.progress = append(q.progress, pipeline.Progress{PagesDone: done, PageCount: total})
+	return nil
 }
 
 func (q *fakeQueue) ClaimNext(context.Context) (database.Document, bool, error) {
@@ -37,12 +44,21 @@ func (q *fakeQueue) Requeue(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-type fakeProc struct{ err error }
+// fakeProc records the trace ID the worker processed the document under.
+type fakeProc struct {
+	err     error
+	traceID *string
+}
 
-func (p fakeProc) Process(_ context.Context, url string) (soa.Document, error) {
+func (p fakeProc) Process(ctx context.Context, url string, onProgress func(pipeline.Progress)) (soa.Document, error) {
 	if url != "https://objects/documents/x.pdf?signed" {
 		return soa.Document{}, fmt.Errorf("unexpected url %q", url)
 	}
+	if p.traceID != nil {
+		*p.traceID = trace.FromContext(ctx)
+	}
+	onProgress(pipeline.Progress{PagesDone: 0, PageCount: 2})
+	onProgress(pipeline.Progress{PagesDone: 2, PageCount: 2})
 	return soa.Document{PageCount: 1}, p.err
 }
 
@@ -67,11 +83,14 @@ func TestProcess(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			q := &fakeQueue{}
-			w := New(q, fakeProc{tt.err}, fakePresigner{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			w := New(q, fakeProc{err: tt.err}, fakePresigner{}, zap.NewNop())
 			retry := w.process(context.Background(), doc)
 			if retry != tt.retry || len(q.completed) != tt.completed || len(q.failed) != tt.failed || len(q.requeued) != tt.requeue {
 				t.Errorf("retry %v, completed %d, failed %d, requeued %d; want %v, %d, %d, %d",
 					retry, len(q.completed), len(q.failed), len(q.requeued), tt.retry, tt.completed, tt.failed, tt.requeue)
+			}
+			if want := []pipeline.Progress{{PagesDone: 0, PageCount: 2}, {PagesDone: 2, PageCount: 2}}; !reflect.DeepEqual(q.progress, want) {
+				t.Errorf("progress recorded %v, want %v", q.progress, want)
 			}
 			if tt.failed > 0 && q.failMsg != tt.err.Error() {
 				t.Errorf("fail message %q, want %q", q.failMsg, tt.err)
@@ -80,9 +99,23 @@ func TestProcess(t *testing.T) {
 	}
 }
 
+func TestProcessUsesUploadTraceID(t *testing.T) {
+	for _, upload := range []string{"4bf92f3577b34da6a3ce929d0e0e4736", ""} {
+		var got string
+		w := New(&fakeQueue{}, fakeProc{traceID: &got}, fakePresigner{}, zap.NewNop())
+		w.process(context.Background(), database.Document{ID: uuid.New(), ObjectKey: "documents/x.pdf", TraceID: upload})
+		switch {
+		case upload != "" && got != upload:
+			t.Errorf("processed under trace %q, want the upload's %q", got, upload)
+		case upload == "" && len(got) != 32:
+			t.Errorf("document without a trace ID processed under %q, want a generated one", got)
+		}
+	}
+}
+
 func TestRunStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	w := New(&fakeQueue{}, fakeProc{}, fakePresigner{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := New(&fakeQueue{}, fakeProc{}, fakePresigner{}, zap.NewNop())
 	done := make(chan struct{})
 	go func() { w.Run(ctx); close(done) }()
 	w.Wake()

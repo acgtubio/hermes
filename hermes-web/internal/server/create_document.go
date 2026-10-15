@@ -13,9 +13,12 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/acgtubio/hermes/internal/api"
 	"github.com/acgtubio/hermes/internal/database"
+	"github.com/acgtubio/hermes/internal/logging"
+	"github.com/acgtubio/hermes/internal/trace"
 )
 
 var pdfMagic = []byte("%PDF-")
@@ -32,9 +35,11 @@ func (s *Server) CreateDocument(ctx context.Context, req api.CreateDocumentReque
 	body := &limitedReader{r: part, n: s.MaxUpload}
 	br := bufio.NewReader(body)
 	magic, err := br.Peek(len(pdfMagic))
+
 	if body.exceeded {
 		return s.tooLarge(), nil
 	}
+
 	if err != nil || !bytes.Equal(magic, pdfMagic) {
 		return api.CreateDocument415JSONResponse{Message: "file is not a PDF"}, nil
 	}
@@ -43,6 +48,7 @@ func (s *Server) CreateDocument(ctx context.Context, req api.CreateDocumentReque
 	key := fmt.Sprintf("documents/%s.pdf", id)
 	hash := sha256.New()
 	var size countWriter
+
 	if err := s.Objects.Put(ctx, key, "application/pdf", io.TeeReader(br, io.MultiWriter(hash, &size))); err != nil {
 		s.deleteObject(ctx, key) // a failed multipart upload is aborted, but don't rely on it
 		if body.exceeded {
@@ -53,6 +59,7 @@ func (s *Server) CreateDocument(ctx context.Context, req api.CreateDocumentReque
 
 	doc, err := s.Docs.Create(ctx, database.NewDocument{
 		ID: id, Filename: part.FileName(), ObjectKey: key, SHA256: hex.EncodeToString(hash.Sum(nil)), Size: int64(size),
+		TraceID: trace.FromContext(ctx), // so the worker's and sidecar's logs carry this request's trace ID
 	})
 	if err != nil {
 		s.deleteObject(ctx, key)
@@ -62,8 +69,11 @@ func (s *Server) CreateDocument(ctx context.Context, req api.CreateDocumentReque
 		}
 		return nil, err
 	}
-	s.Log.InfoContext(ctx, "document queued", "document_id", id, "filename", doc.Filename, "bytes", int64(size))
+
+	logging.Ctx(ctx, s.Log).Info("document queued",
+		zap.Stringer("document_id", id), zap.String("filename", doc.Filename), zap.Int64("bytes", int64(size)))
 	s.Wake()
+
 	return api.CreateDocument202JSONResponse(toAPI(doc)), nil
 }
 
@@ -74,7 +84,7 @@ func (s *Server) tooLarge() api.CreateDocument413JSONResponse {
 func (s *Server) deleteObject(ctx context.Context, key string) {
 	// The request context may be what failed; cleanup shouldn't depend on it.
 	if err := s.Objects.Delete(context.WithoutCancel(ctx), key); err != nil {
-		s.Log.WarnContext(ctx, "delete orphaned upload", "key", key, "err", err)
+		logging.Ctx(ctx, s.Log).Warn("delete orphaned upload", zap.String("key", key), zap.Error(err))
 	}
 }
 

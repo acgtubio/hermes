@@ -60,6 +60,9 @@ func TestCreateDocument(t *testing.T) {
 	if docs.bySum[hex.EncodeToString(sum[:])] != got.Id {
 		t.Error("document not stored under the file's sha256")
 	}
+	if traceID := rec.Header().Get(TraceIDHeader); docs.created[0].TraceID != traceID || traceID == "" {
+		t.Errorf("document stored with trace ID %q, want the request's %q", docs.created[0].TraceID, traceID)
+	}
 
 	t.Run("duplicate", func(t *testing.T) {
 		rec := upload(t, h, "file", "again.pdf", samplePDF)

@@ -1,16 +1,21 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/acgtubio/hermes/internal/trace"
 )
 
 // testdata/document.json is real pipeline output, trimmed: Sep 1-15 2026 page 4 rows 8-9 (row 9's
@@ -23,12 +28,20 @@ func sidecar(t *testing.T, code int, body []byte) *Client {
 		if r.URL.Path != "/process" || json.NewDecoder(r.Body).Decode(&req) != nil || req.URL != "http://objects/doc.pdf" {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL)
 		}
+		if id, _ := trace.FromTraceparent(r.Header.Get(trace.Header)); id != testTraceID {
+			t.Errorf("traceparent %q doesn't carry trace %s", r.Header.Get(trace.Header), testTraceID)
+		}
 		w.WriteHeader(code)
 		w.Write(body)
 	}))
 	t.Cleanup(srv.Close)
 	return New(srv.URL, time.Minute)
 }
+
+const testTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+// ctx carries the trace ID the sidecar stub expects in the traceparent header.
+var ctx = trace.WithID(context.Background(), testTraceID)
 
 func numeric(t *testing.T, n pgtype.Numeric) string {
 	t.Helper()
@@ -42,14 +55,38 @@ func numeric(t *testing.T, n pgtype.Numeric) string {
 	return v.(string)
 }
 
+// stream builds a sidecar response: one NDJSON line per message.
+func stream(t *testing.T, msgs ...any) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	for _, m := range msgs {
+		line, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(append(line, '\n'))
+	}
+	return b.Bytes()
+}
+
+func progress(done, total int) map[string]any {
+	return map[string]any{"type": "progress", "pages_done": done, "page_count": total}
+}
+
 func TestProcess(t *testing.T) {
 	fixture, err := os.ReadFile("testdata/document.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := sidecar(t, http.StatusOK, fixture).Process(context.Background(), "http://objects/doc.pdf")
+	body := stream(t, progress(0, 28), progress(1, 28), progress(2, 28),
+		map[string]any{"type": "result", "document": json.RawMessage(fixture)})
+	var got []Progress
+	doc, err := sidecar(t, http.StatusOK, body).Process(ctx, "http://objects/doc.pdf", func(p Progress) { got = append(got, p) })
 	if err != nil {
 		t.Fatal(err)
+	}
+	if want := []Progress{{0, 28}, {1, 28}, {2, 28}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("progress = %v, want %v", got, want)
 	}
 	if doc.PageCount != 28 || len(doc.Rows) != 3 || len(doc.Totals) != 2 {
 		t.Fatalf("page_count %d, %d rows, %d totals; want 28, 3, 2", doc.PageCount, len(doc.Rows), len(doc.Totals))
@@ -94,15 +131,26 @@ func TestProcess(t *testing.T) {
 }
 
 func TestProcessErrors(t *testing.T) {
-	_, err := sidecar(t, http.StatusServiceUnavailable, []byte(`{"error":"busy"}`)).Process(context.Background(), "http://objects/doc.pdf")
+	// Mid-stream failures, after the 200: an error message, and a stream cut off before its result.
+	_, err := sidecar(t, http.StatusOK, stream(t, progress(0, 3), map[string]any{"type": "error", "error": "KeyError: 'w'"})).
+		Process(ctx, "http://objects/doc.pdf", nil)
+	if err == nil || err.Error() != "pipeline: KeyError: 'w'" {
+		t.Errorf("error message: err = %v", err)
+	}
+	_, err = sidecar(t, http.StatusOK, stream(t, progress(0, 3), progress(1, 3))).Process(ctx, "http://objects/doc.pdf", nil)
+	if err == nil || !strings.Contains(err.Error(), "unexpected EOF") || errors.Is(err, ErrRetryable) {
+		t.Errorf("truncated stream: err = %v, want unexpected EOF", err)
+	}
+
+	_, err = sidecar(t, http.StatusServiceUnavailable, []byte(`{"error":"busy"}`)).Process(ctx, "http://objects/doc.pdf", nil)
 	if !errors.Is(err, ErrRetryable) {
 		t.Errorf("503: err = %v, want ErrRetryable", err)
 	}
-	_, err = sidecar(t, http.StatusUnprocessableEntity, []byte(`{"error":"FileDataError: broken pdf"}`)).Process(context.Background(), "http://objects/doc.pdf")
+	_, err = sidecar(t, http.StatusUnprocessableEntity, []byte(`{"error":"FileDataError: broken pdf"}`)).Process(ctx, "http://objects/doc.pdf", nil)
 	if err == nil || errors.Is(err, ErrRetryable) || err.Error() != "pipeline: FileDataError: broken pdf (HTTP 422)" {
 		t.Errorf("422: err = %v", err)
 	}
-	_, err = New("http://127.0.0.1:1", time.Second).Process(context.Background(), "http://objects/doc.pdf")
+	_, err = New("http://127.0.0.1:1", time.Second).Process(ctx, "http://objects/doc.pdf", nil)
 	if !errors.Is(err, ErrRetryable) {
 		t.Errorf("sidecar down: err = %v, want ErrRetryable", err)
 	}

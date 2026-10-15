@@ -3,9 +3,9 @@ package server
 import (
 	"context"
 	"io"
-	"log/slog"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/acgtubio/hermes/internal/api"
 	"github.com/acgtubio/hermes/internal/database"
@@ -25,6 +25,11 @@ type DocumentStore interface {
 	Get(ctx context.Context, id uuid.UUID) (database.Document, error)
 }
 
+// Subscriber is the subset of *events.Hub the event stream needs.
+type Subscriber interface {
+	Subscribe(id uuid.UUID) (<-chan struct{}, func())
+}
+
 // ObjectStore is the subset of *storage.S3 the handlers need.
 type ObjectStore interface {
 	Put(ctx context.Context, key, contentType string, r io.Reader) error
@@ -36,14 +41,17 @@ type Deps struct {
 	DB        Pinger
 	Docs      DocumentStore
 	Objects   ObjectStore
+	Events    Subscriber
 	Wake      func() // called after a document is queued, e.g. (*worker.Worker).Wake
 	MaxUpload int64  // bytes
-	Log       *slog.Logger
+	Log       *zap.Logger
 }
 
 // Server implements api.StrictServerInterface.
 type Server struct {
 	Deps
+	streams     context.Context // cancelled by StopStreams
+	stopStreams context.CancelFunc
 }
 
 var _ api.StrictServerInterface = (*Server)(nil)
@@ -52,13 +60,19 @@ func New(d Deps) *Server {
 	if d.Wake == nil {
 		d.Wake = func() {}
 	}
-	return &Server{Deps: d}
+	streams, stop := context.WithCancel(context.Background())
+	return &Server{Deps: d, streams: streams, stopStreams: stop}
 }
+
+// StopStreams ends every open event stream. Register it with (*http.Server).RegisterOnShutdown:
+// Shutdown waits for connections to go idle, and a stream never does.
+func (s *Server) StopStreams() { s.stopStreams() }
 
 func toAPI(d database.Document) api.Document {
 	return api.Document{
 		Id: d.ID, Filename: d.Filename, Status: api.DocumentStatus(d.Status), Error: d.Error,
-		PageCount: d.PageCount, RowCount: d.RowCount, NeedsReviewCount: d.NeedsReviewCount,
+		PageCount: d.PageCount, PagesDone: d.PagesDone, PagesTotal: d.PagesTotal,
+		RowCount: d.RowCount, NeedsReviewCount: d.NeedsReviewCount,
 		CreatedAt: d.CreatedAt, ProcessedAt: d.ProcessedAt,
 	}
 }

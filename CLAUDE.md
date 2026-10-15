@@ -42,7 +42,7 @@ Document processing:
 1. The browser uploads a PDF to `POST /api/documents`. The handler streams it to `documents/<id>.pdf` in the bucket, hashing as it goes. It inserts a `queued` row in `documents` and returns `202`. The same SHA-256 uploaded again returns `409`.
 2. `internal/worker` runs in-process. It claims the oldest queued document (`FOR UPDATE SKIP LOCKED`) and hands the sidecar (`hermes-cv/server.py`) a 15-minute presigned GET URL.
 3. It stores the result in one transaction (`soa_rows`, `soa_totals`) and marks the document `ready`. If the pipeline errors, the document is marked `failed` with the error.
-4. The browser polls `GET /api/documents/{id}`.
+4. The browser follows `GET /api/documents/{id}/events` (SSE), or polls `GET /api/documents/{id}`.
 
 Details:
 - The `documents` table is the queue; there's no Redis. One document runs at a time, because the pipeline already uses every core.
@@ -52,6 +52,16 @@ Details:
   - Typed columns are NULL when a cell is `failed` or doesn't parse. The raw cell (`text`, `conf`, `bbox`, `status`, `first_read`) is always kept in the `cells` JSONB.
   - `needs_review` means a cell failed or was inferred.
   - The amount format rule matches `validate.num` in hermes-cv. Keep them in step.
+
+Status events (SSE):
+- `GET /api/documents/{id}/events` sends a `document` event on connect, after each status change and, while processing, after each finished page (`pages_done` of `pages_total`). Its data is the same JSON as `GET /documents/{id}`. After `ready` or `failed` it sends `end` and closes. It sends a `: ping` every 20 s.
+- The `documents_notify` trigger (migrations 00003 and 00004) is the single source of change events. It runs `pg_notify('document_events', id)` on insert and on every update of `status` or `pages_done`, so code that changes a status needn't notify, and manual SQL updates reach the streams too.
+- `database.Listen` holds one hijacked LISTEN connection per API instance and feeds `events.Hub`. That works whichever instance or process made the change. On reconnect it wakes every stream (`PublishAll`), since notifications sent while it was down are lost.
+- Wake-ups carry no data. The stream re-reads the row and sends it only if it changed, so bursts coalesce, and a reconnecting browser just gets the current state again. There are no event IDs to replay.
+- A stream must subscribe *before* its first read (`StreamDocumentEvents` does), or a change can slip in between.
+- The stream implements the generated response interface itself. It clears the connection's read and write deadlines with `http.ResponseController`, because `WriteTimeout` (30 s) would cut it and `ReadTimeout` would cancel its context.
+- Progress is stored, not just relayed. The sidecar streams it to the worker, and the worker writes it to `documents.pages_done`/`pages_total` (`SetProgress`). The trigger then turns each write into an event on whichever instance the browser is connected to, and a reconnecting browser gets the current count. `ClaimNext`, `Requeue` and `RequeueStale` clear it.
+- `main.go` registers `StopStreams` with `RegisterOnShutdown`. Without it, `Shutdown` would wait out its timeout on open streams.
 
 Database and storage:
 - Migrations are goose SQL files in `internal/database/migrations/NNNNN_name.sql`. They're embedded and applied at startup by `database.Migrate`.
@@ -63,7 +73,7 @@ Configuration:
   - `HERMES_PORT` (8080)
   - `HERMES_DATABASE_URL` (required)
   - `HERMES_SHUTDOWN_TIMEOUT` (10s)
-  - `HERMES_LOG_LEVEL` (info)
+  - `HERMES_LOG_LEVEL` (info; a zap level: debug, info, warn, error)
   - `HERMES_S3_ENDPOINT` (localhost:9000)
   - `HERMES_S3_ACCESS_KEY`, `HERMES_S3_SECRET_KEY` (required)
   - `HERMES_S3_BUCKET` (hermes-documents; created if missing)
@@ -74,6 +84,16 @@ Configuration:
 - Internal packages must not import config. They take plain values such as `database.New(ctx, url)`.
 - To add a new dependency (e.g. Redis): add a config field, construct the client in `main.go`, and pass it into `server.New` through `server.Deps`.
 - Handlers and the worker depend on small interfaces rather than concrete clients, so tests can use fakes. Examples: `server.Pinger`, `server.DocumentStore`, `server.ObjectStore`, `worker.Queue`.
+
+Logging and trace IDs:
+- Logging uses zap (`*zap.Logger`), built by `logging.New`: JSON on stdout. Log with typed fields (`zap.Error(err)`, `zap.Stringer("document_id", id)`), not key/value pairs.
+- Whenever a context is available, log through `logging.Ctx(ctx, log)`, which adds the `trace_id` field.
+- Tests use `zap.NewNop()`, or `zaptest/observer` to assert on log entries (see `newObservedRouter`).
+- Trace IDs use the W3C trace-context format (`internal/trace`):
+  - The `traceIDs` middleware takes the ID from an incoming `traceparent` header, or generates one. It's put in the context and returned as `X-Trace-Id`.
+  - An upload's trace ID is stored on its `documents` row (`trace_id`). The worker processes the document under it and forwards it to the sidecar in a `traceparent` header.
+  - So the upload request, the job's logs and the sidecar's `[trace <id>]` lines can all be found by one ID. A document without a stored ID gets a fresh one when processed.
+  - This is not OpenTelemetry (there are no spans or exporter), but the format stays compatible if OTel is added later.
 
 ## hermes-web/web (frontend)
 
@@ -101,10 +121,15 @@ Install with `pip install -r requirements.txt`; the `tesseract` binary must also
 - It writes the whole document to `<outdir>/document.json`: `{page_count, pages: [{page, rows, subtotals, footer}], flags, totals}`.
 
 `python server.py` is the sidecar the Go API calls. It listens on `HERMES_PIPELINE_PORT`, default 8090.
-- `POST /process {"url": ...}` downloads the PDF from the presigned URL and returns `run.process`'s document.
+- `POST /process {"url": ...}` downloads the PDF from the presigned URL. It answers with newline-delimited JSON:
+  - `{"type": "progress", "pages_done", "page_count"}`, once the pages are rendered (0) and then per page;
+  - then either `{"type": "result", "document"}` or `{"type": "error", "error"}`.
+
+  Failures before the stream starts keep their status codes: 400, 503 when busy, 422 when the download fails. `pipeline.Client` reads the stream with a `json.Decoder`, because the result line is the whole document, megabytes long.
 - It handles one job at a time and returns `503` while busy.
-- A caller that disconnects doesn't cancel the job in progress.
+- When the caller disconnects, the next progress write fails and `run.process` stops the pool's workers (`terminate_workers`, Python 3.14+). The sidecar is then free within seconds, instead of OCRing the rest of the document. Tesseract calls already running finish on their own. On older Python only the pages not yet handed to workers are cancelled.
 - It holds no storage credentials.
+- It prefixes every log line with `[trace <id>]`, taken from the caller's `traceparent` header (`-` if there isn't one). Its error bodies include `trace_id`.
 
 The stage scripts can also be run one at a time. Run them in order from one working directory; each stage hands off to the next through files in the current directory:
 
