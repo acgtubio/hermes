@@ -84,15 +84,23 @@ The stage scripts can also be run one at a time. Run them in order from one work
    - A dateless line with ≥3 amounts is a totals line: the last one is the NET AMOUNT footer, earlier ones are `subtotals`. Text after the footer (the signature block) is ignored.
 5. `python reread.py` repairs cells that fail a check. Repaired cells keep `first_read`, and `run.py` does this automatically.
    - ID fields: if exactly one token matches the format (a handwritten tick read as `4`), it keeps that token. Otherwise it re-OCRs the cell as a single line with the field's character whitelist and keeps the result only if it matches the format.
-   - Row amounts: re-OCRed the same way, kept only if the row arithmetic then holds.
+   - Row amounts: re-OCRed the same way, kept only if the row arithmetic then holds. If no re-read fixes the row, `validate.infer` recomputes each amount from the other four and applies the result only when exactly one cell makes the row hold. This covers unreadable cells and misreads that still parse (`1,639.00` for `1,539.00`).
    - Subtotal and footer amounts: kept once they parse; the cross-page check verifies them.
+   - Every cell gets a `status`, the signal the backend should use to warn users. `conf` stays the first-pass OCR confidence; it's a secondary hint and is often high on misreads.
+     - `ok`: passed its field's check (row arithmetic for amounts, `FORMATS` for IDs/date, the cross-page sums for subtotal/footer cells)
+     - `repaired`: a re-read passed
+     - `inferred`: computed from the row's arithmetic, not read
+     - `failed`: still fails its check
+     - `unchecked`: no check exists (`text`)
+
+     Subtotal and footer statuses are set by `check_totals`, so only `run.py` writes them.
 6. `python validate.py [rows.json ...]` checks the following, using `Decimal` throughout:
    - field formats (`FORMATS`). Amounts group only the last thousands, e.g. `1001,579.43`; that's how the report prints them, not an OCR slip.
    - sales + vat = total
    - total − withholding = net
    - withholding = 2% of sales, rounded half-up
    - cells with OCR conf < 80
-   - subtotals against the rows in their group (groups can span pages)
+   - subtotals against the rows in their group (groups can span pages). Sums are per column, so an unreadable cell leaves only its own column short.
    - footers. Each page's NET AMOUNT is a **running total** across the document, so pass every page's `rows.json` in order. Given a single page, mismatches are expected and say so.
 
 Key coupling to keep in mind when editing:

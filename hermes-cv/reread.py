@@ -1,5 +1,5 @@
 import json, re, cv2, pytesseract, time
-from validate import FORMATS, AMOUNTS, num, row_ok
+from validate import FORMATS, AMOUNTS, annotate_rows, fmt, infer, num, row_ok
 
 AMOUNT_CHARS = "0123456789.,"
 WHITELISTS = {"po_number": "0123456789", "service_entry_sheet": "0123456789", "doc_header_text": "0123456789",
@@ -15,7 +15,9 @@ def reread(g, table, c, field):
 
 def repair(g, table, d):
     """Second pass over cells that fail a check: keep a re-read only when it passes the check the first
-    read failed (format for ID fields, the row's arithmetic for amounts). Repaired cells keep `first_read`."""
+    read failed (format for ID fields, the row's arithmetic for amounts). If no re-read fixes a row's
+    amounts, the one cell its arithmetic determines is inferred. Changed cells keep `first_read`; every row
+    cell gets a `status` (see validate.cell_status)."""
     fixes = []
     for r in d["rows"]:
         cells = r["cells"]
@@ -34,12 +36,18 @@ def repair(g, table, d):
                     fixes.append((f"row {r['row_index']}", k, old, cells[k]["text"])); cells[k]["first_read"] = old
                     break
                 cells[k]["text"] = old
+        if not row_ok(r) and (found := infer(r)):
+            k, v = found
+            c = cells.setdefault(k, {"text": "", "conf": 0.0, "bbox": None})  # a cell OCR missed altogether
+            fixes.append((f"row {r['row_index']}", k, c["text"], fmt(v) + " (inferred)"))
+            c["first_read"], c["text"], c["status"] = c["text"], fmt(v), "inferred"
     for label, cells in [(f"subtotal after row {s['after_row']}", s["cells"]) for s in d["subtotals"]] + [("footer", d["footer"] or {})]:
         for k, c in cells.items():  # totals are checked across pages later; here just make them readable
             if num(c["text"]) is None:
                 txt = reread(g, table, c, k)
                 if num(txt) is not None:
                     fixes.append((label, k, c["text"], txt)); c["first_read"], c["text"] = c["text"], txt
+    annotate_rows(d)
     return fixes
 
 if __name__ == "__main__":

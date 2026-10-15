@@ -40,3 +40,5 @@ if __name__ == "__main__":
     flags = [(d, i, m) for d, o in pages for i, m in validate.check_rows(o)]
     for d, i, m in flags: print(f"{d} row {i} - {m}")
     print("\n".join(validate.check_totals(pages)))
+    for d, out in pages:  # check_totals set the subtotal and footer cells' status
+        json.dump(out, open(os.path.join(d, "rows.json"), "w"), indent=1)
