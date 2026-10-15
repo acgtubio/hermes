@@ -1,0 +1,123 @@
+.app {
+  min-height: 100svh;
+}
+
+/* The header is the path, sitting on the page background: no bar, no border. */
+.app-header {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 0 24px;
+}
+
+.app-trail {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.app-brand,
+.app-brand:hover {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.app-logo {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--ink);
+  color: var(--ground);
+}
+
+.app-sep {
+  flex: none;
+  color: var(--line-strong);
+}
+
+.app-crumb {
+  min-width: 0;
+  padding: 4px 6px;
+  overflow: hidden;
+  border-radius: 4px;
+  color: var(--muted);
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+a.app-crumb {
+  flex: none;
+}
+
+a.app-crumb:hover {
+  color: var(--ink);
+  background: var(--line);
+}
+
+.app-crumb[aria-current='page'] {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.app-main {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: 100%;
+  max-width: 768px;
+  margin: 0 auto;
+  padding: 32px 24px 64px;
+}
+
+@media (max-width: 600px) {
+  .app-header {
+    padding: 0 16px;
+  }
+
+  .app-trail {
+    gap: 2px;
+  }
+
+  /* logo only, with a 44px tap target */
+  .app-brand {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .app-brand-name {
+    display: none;
+  }
+
+  a.app-crumb {
+    flex: 0 1 auto;
+  }
+
+  .app-crumb {
+    padding: 10px 6px;
+  }
+
+  .app-main {
+    gap: 20px;
+    padding: 20px 16px 32px;
+  }
+}
+
+/* A page's title block: h1 plus an optional one-line description */
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

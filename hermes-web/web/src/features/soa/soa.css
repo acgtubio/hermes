@@ -1,0 +1,57 @@
+/* SOA feature layout. Components and colours come from shared/ui and the tokens in index.css. */
+.soa-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.soa-stack-tight {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.soa-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Document page: filename with its status badge */
+.soa-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.soa-error-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.soa-trace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.soa-trace .mono {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .soa-actions .btn {
+    width: 100%;
+  }
+
+  .soa-title {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
