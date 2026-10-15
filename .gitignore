@@ -43,3 +43,6 @@ hermes-cv/*.tif
 hermes-cv/*.tiff
 hermes-cv/*.pdf
 hermes-cv/sample-files/*.pdf
+
+# Task checksums
+.task/

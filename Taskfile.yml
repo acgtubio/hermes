@@ -1,0 +1,193 @@
+# Local development tasks. Run `task` (on Arch the binary is `go-task`) to list them.
+#   task setup     install every dependency (idempotent)
+#   task dev       start Postgres + storage, then the OCR sidecar, the API and the frontend
+# Settings come from .env (yours, git-ignored), then .env.example (the defaults).
+version: '3'
+
+dotenv: ['.env', '.env.example']
+
+env:
+  # podman compose prints a banner on every call when it delegates to docker-compose
+  PODMAN_COMPOSE_WARNING_LOGS: 'false'
+
+vars:
+  # Podman if it's installed, Docker otherwise. Override with: task COMPOSE="docker compose" …
+  COMPOSE:
+    sh: if command -v podman >/dev/null 2>&1; then echo "podman compose"; else echo "docker compose"; fi
+  PYTHON: '{{.PYTHON | default "python3"}}'
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - '{{.TASK_EXE}} --list'
+
+  # --- Setup -------------------------------------------------------------------------------
+
+  setup:
+    desc: Install all dependencies (Python venv, Go modules, pnpm packages)
+    deps: [setup:cv, setup:api, setup:web]
+
+  setup:cv:
+    desc: Create hermes-cv/.venv and install the pipeline's Python packages
+    run: once
+    dir: hermes-cv
+    preconditions:
+      - sh: command -v tesseract
+        msg: "tesseract isn't on your PATH. Install it first (see README.md, Prerequisites)."
+    sources: [requirements.txt]
+    generates: [.venv/bin/python]
+    cmds:
+      - '{{.PYTHON}} -m venv .venv'
+      - .venv/bin/pip install --quiet --upgrade pip
+      - .venv/bin/pip install --quiet -r requirements.txt
+
+  setup:api:
+    desc: Download the API's Go modules
+    run: once
+    dir: hermes-web
+    sources: [go.mod, go.sum]
+    cmds:
+      - go mod download
+
+  setup:web:
+    desc: Install the frontend's packages
+    run: once
+    dir: hermes-web/web
+    sources: [package.json, pnpm-lock.yaml]
+    generates: [node_modules/.modules.yaml]
+    cmds:
+      - pnpm install --frozen-lockfile
+
+  # --- Backing services (compose.yaml) -----------------------------------------------------
+
+  infra:up:
+    desc: Start Postgres and S3 storage, and wait until they're ready
+    cmds:
+      - '{{.COMPOSE}} up -d --wait'
+      # RustFS's image has no curl for a compose healthcheck, so poll its port from here: the
+      # API creates its bucket at startup and exits if storage isn't answering yet.
+      - |
+        for i in $(seq 60); do
+          curl -s -o /dev/null "http://localhost:${HERMES_S3_PORT}/" && exit 0
+          sleep 0.5
+        done
+        echo "S3 storage didn't answer on :${HERMES_S3_PORT} within 30s"; exit 1
+
+  infra:down:
+    desc: Stop Postgres and S3 storage (their data is kept)
+    cmds:
+      - '{{.COMPOSE}} down'
+
+  infra:reset:
+    desc: Stop Postgres and S3 storage and delete their data
+    prompt: This deletes every uploaded document and extracted row. Continue?
+    cmds:
+      - '{{.COMPOSE}} down --volumes'
+
+  infra:logs:
+    desc: Follow the backing services' logs
+    cmds:
+      - '{{.COMPOSE}} logs --follow'
+
+  infra:ps:
+    desc: Show the backing services' status
+    cmds:
+      - '{{.COMPOSE}} ps'
+
+  # --- Run ---------------------------------------------------------------------------------
+
+  dev:
+    desc: Start everything; Ctrl+C stops the sidecar, API and frontend (infra:down stops the rest)
+    cmds:
+      - task: infra:up
+      - task: run
+
+  run:
+    desc: Start the OCR sidecar, the API and the frontend together (needs infra:up)
+    deps: [setup]
+    cmds:
+      # one prefixed stream: [cv] …, [api] …, [web] …
+      - '{{.TASK_EXE}} --parallel --output prefixed cv api web'
+
+  cv:
+    desc: Run the OCR sidecar on :8090
+    deps: [setup:cv]
+    dir: hermes-cv
+    cmds:
+      - .venv/bin/python server.py
+
+  api:
+    desc: Run the API on :8080
+    deps: [setup:api]
+    dir: hermes-web
+    cmds:
+      - go run ./cmd/api
+
+  web:
+    desc: Run the frontend dev server on :5173
+    deps: [setup:web]
+    dir: hermes-web/web
+    cmds:
+      - pnpm dev
+
+  cv:run:
+    desc: 'Run the OCR pipeline on one file, without the API: task cv:run -- statement.pdf [outdir]'
+    deps: [setup:cv]
+    dir: hermes-cv
+    cmds:
+      - .venv/bin/python run.py {{.CLI_ARGS}}
+
+  # --- Checks ------------------------------------------------------------------------------
+
+  generate:
+    desc: Regenerate the API's server code from api/openapi.yaml
+    dir: hermes-web
+    cmds:
+      - go generate ./...
+
+  test:
+    desc: Run the Go tests
+    dir: hermes-web
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: gofmt, go vet and oxlint
+    cmds:
+      - task: lint:api
+      - task: lint:web
+
+  lint:api:
+    dir: hermes-web
+    cmds:
+      - 'test -z "$(gofmt -l .)" || { gofmt -l .; echo "gofmt found unformatted files (above)"; exit 1; }'
+      - go vet ./...
+
+  lint:web:
+    dir: hermes-web/web
+    cmds:
+      - pnpm lint
+
+  build:
+    desc: Build the API binary (hermes-web/bin/hermes-api) and the frontend bundle
+    cmds:
+      - task: build:api
+      - task: build:web
+
+  build:api:
+    dir: hermes-web
+    cmds:
+      - go build -o bin/hermes-api ./cmd/api
+
+  build:web:
+    dir: hermes-web/web
+    cmds:
+      - pnpm build
+
+  check:
+    desc: Everything CI would run (test, lint, build)
+    cmds:
+      - task: test
+      - task: lint
+      - task: build

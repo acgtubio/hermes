@@ -69,10 +69,14 @@ func New(d Deps) *Server {
 func (s *Server) StopStreams() { s.stopStreams() }
 
 func toAPI(d database.Document) api.Document {
-	return api.Document{
+	doc := api.Document{
 		Id: d.ID, Filename: d.Filename, Status: api.DocumentStatus(d.Status), Error: d.Error,
 		PageCount: d.PageCount, PagesDone: d.PagesDone, PagesTotal: d.PagesTotal,
 		RowCount: d.RowCount, NeedsReviewCount: d.NeedsReviewCount,
 		CreatedAt: d.CreatedAt, ProcessedAt: d.ProcessedAt,
 	}
+	if d.TraceID != "" {
+		doc.TraceId = &d.TraceID
+	}
+	return doc
 }

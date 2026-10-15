@@ -1,0 +1,39 @@
+# Backing services for local development: Postgres and S3-compatible storage.
+# Works with `podman compose` and `docker compose`; `task infra:up` picks whichever is installed.
+# The app processes (OCR sidecar, API, frontend) run on the host: see Taskfile.yml.
+#
+# Credentials and ports come from the environment, with the defaults in .env.example.
+name: hermes
+
+services:
+  postgres:
+    image: docker.io/library/postgres:17
+    environment:
+      POSTGRES_USER: ${HERMES_PG_USER:-hermes}
+      POSTGRES_PASSWORD: ${HERMES_PG_PASSWORD:-hermes}
+      POSTGRES_DB: ${HERMES_PG_DB:-hermes}
+    ports:
+      - "${HERMES_PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  # RustFS stands in for MinIO, whose images can no longer be pulled from Docker Hub or quay.io.
+  # The API only uses the plain S3 API, so any S3-compatible store works.
+  s3:
+    image: docker.io/rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: ${HERMES_S3_ACCESS_KEY:-hermes}
+      RUSTFS_SECRET_KEY: ${HERMES_S3_SECRET_KEY:-hermes-secret}
+    ports:
+      - "${HERMES_S3_PORT:-9000}:9000"
+    volumes:
+      - s3-data:/data
+
+volumes:
+  postgres-data:
+  s3-data:

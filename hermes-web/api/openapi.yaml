@@ -152,6 +152,11 @@ components:
         processed_at:
           type: string
           format: date-time
+        trace_id:
+          type: string
+          description: >
+            W3C trace ID of the upload. The processing job's logs (the API's and the pipeline's)
+            carry the same ID, so quote it when reporting a problem with this document.
     Health:
       type: object
       required: [status]
